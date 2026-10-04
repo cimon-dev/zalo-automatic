@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build Outputs
+dist/
+build/
+.next/
+out/
+
+# Environment Variables & Secrets
+.env
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+*.env
+
+# Local Storage, Sessions & User Data
+storage/*.json
+!storage/persona_context.json
+storage/sessions/
+storage/*.png
+apps/backend/storage/*.json
+!apps/backend/storage/persona_context.json
+apps/backend/storage/sessions/
+apps/backend/storage/*.png
+
+# Development / Scratch Debug Files
+scratch/
+apps/backend/scratch/
+*.log
+
+# OS & Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
