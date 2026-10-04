@@ -128,7 +128,9 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
         await this.page.waitForTimeout(1000);
 
         // 1. Kiểm tra xem đã đăng nhập vào màn hình chat chưa
-        const chatEl = await this.page.$('#chat-list-container, #main-tab, .nav__tabs, .conv-list, #contact-search-input');
+        const chatEl = await this.page.$(
+          '#chat-list-container, #main-tab, .nav__tabs, .conv-list, #contact-search-input, .conv-item, #chatViewContainer, .chat-view-container'
+        );
         if (chatEl) {
           this.logger.log(`Session hợp lệ, đã đăng nhập thành công sau ${i + 1}s!`);
           await this.onLoginSuccess();
@@ -136,13 +138,18 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
         }
 
         // 2. Kiểm tra xem có mã QR trên màn hình chưa
-        const qrEl = await this.page.$('.qrcode-img, .qr-container, canvas, .login-body img');
+        const qrEl = await this.page.$('.qrcode-img, .qr-container, canvas, .login-body img, [class*="qrcode"]');
         if (qrEl) {
           this.logger.log(`Phát hiện mã QR sau ${i + 1}s, đang xử lý chụp QR...`);
           this.status = 'WAITING_QR';
           this.emit('status_change', this.status);
           await this.captureAndWatchQrCode();
           return;
+        }
+
+        if ((i + 1) % 15 === 0) {
+          const title = await this.page.title().catch(() => '');
+          this.logger.log(`Đang kiểm tra trạng thái đăng nhập (${i + 1}s)... Title: "${title}"`);
         }
       }
 
@@ -159,7 +166,9 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
 
     try {
       // 1. Kiểm tra lại xem có phải đã đăng nhập thành công không
-      const checkChat = await this.page.$('#chat-list-container, #main-tab, .nav__tabs, .conv-list, #contact-search-input');
+      const checkChat = await this.page.$(
+        '#chat-list-container, #main-tab, .nav__tabs, .conv-list, #contact-search-input, .conv-item, #chatViewContainer, .chat-view-container'
+      );
       if (checkChat) {
         await this.onLoginSuccess();
         return;
@@ -173,12 +182,12 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
           (qrTab as HTMLElement).click();
         }
       }).catch(() => {});
-      await this.page.waitForTimeout(600);
+      await this.page.waitForTimeout(800);
 
       this.logger.log('Đang tìm phần tử mã QR trên trang...');
       const qrElement = await this.page.waitForSelector(
         '.qrcode-img, .qr-container, canvas, .login-body img, [class*="qrcode"]',
-        { timeout: 30000 }
+        { timeout: 15000 }
       ).catch(() => null);
 
       if (qrElement) {
@@ -186,16 +195,28 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
         const qrBuffer = await qrElement.screenshot();
         const base64Image = `data:image/png;base64,${qrBuffer.toString('base64')}`;
 
+        this.status = 'WAITING_QR';
+        this.emit('status_change', this.status);
         this.logger.log('Đã tạo ảnh QR Code thành công. Đang gửi về UI...');
         this.emit('qr_code', base64Image);
 
-        await this.page.waitForSelector('#chat-list-container, #main-tab, .nav__tabs, .conv-list, #contact-search-input', { timeout: 180000 });
+        await this.page.waitForSelector(
+          '#chat-list-container, #main-tab, .nav__tabs, .conv-list, #contact-search-input, .conv-item, #chatViewContainer',
+          { timeout: 180000 }
+        );
         await this.onLoginSuccess();
       } else {
         // Kiểm tra lần cuối sau timeout xem có vừa vào chat không
-        const checkAfter = await this.page.$('#chat-list-container, #main-tab, .nav__tabs, .conv-list, #contact-search-input');
+        const checkAfter = await this.page.$(
+          '#chat-list-container, #main-tab, .nav__tabs, .conv-list, #contact-search-input, .conv-item, #chatViewContainer'
+        );
         if (checkAfter) {
           await this.onLoginSuccess();
+        } else {
+          this.logger.warn('Chưa tìm thấy mã QR hoặc khung chat. Tự động tải lại trang sau 3 giây để thử lại...');
+          await this.page.waitForTimeout(3000);
+          await this.page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+          setTimeout(() => this.navigateToZalo(), 1000);
         }
       }
     } catch (error) {
