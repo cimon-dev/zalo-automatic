@@ -127,12 +127,13 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
       for (let i = 0; i < 60; i++) {
         await this.page.waitForTimeout(1000);
 
+        const title = await this.page.title().catch(() => '');
         // 1. Kiểm tra xem đã đăng nhập vào màn hình chat chưa
         const chatEl = await this.page.$(
           '#chat-list-container, #main-tab, .nav__tabs, .conv-list, #contact-search-input, .conv-item, #chatViewContainer, .chat-view-container'
         );
-        if (chatEl) {
-          this.logger.log(`Session hợp lệ, đã đăng nhập thành công sau ${i + 1}s!`);
+        if (chatEl || (title === 'Zalo' && i > 3)) {
+          this.logger.log(`Session hợp lệ, đã đăng nhập thành công sau ${i + 1}s! (Title: "${title}")`);
           await this.onLoginSuccess();
           return;
         }
