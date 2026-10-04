@@ -155,19 +155,10 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
               await new Promise((r) => setTimeout(r, 600));
             }
 
-            const sent = await this.playwrightService.sendMessage(replyText);
+            const sent = await this.playwrightService.sendMessage(replyText, 'Bạn (Gemini Tự động)');
             this.server?.emit('ai_typing', { isTyping: false });
 
             if (sent) {
-              const aiMessage: IncomingMessage = {
-                id: `ai_${Date.now()}`,
-                senderName: 'Bạn (Gemini Tự động)',
-                content: replyText,
-                timestamp: Date.now(),
-                isSelf: true,
-                conversationName: targetConvName,
-              };
-              this.server?.emit('new_message', aiMessage);
               this.logger.log(`[AI Auto-Reply 100%] ĐÃ GỬI PHẢN HỒI THÀNH CÔNG cho "${targetConvName}": "${replyText}"`);
             }
           } catch (err) {
@@ -217,18 +208,8 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
         if (lastMsg && !lastMsg.isSelf && lastMsg.content) {
           this.server?.emit('ai_typing', { isTyping: true, recipient: conv.name });
           const reply = await this.geminiService.generateReply(conv.name, lastMsg.content);
-          await this.playwrightService.sendMessage(reply);
+          await this.playwrightService.sendMessage(reply, 'Bạn (Gemini Tự động)');
           this.server?.emit('ai_typing', { isTyping: false });
-
-          const aiMessage: IncomingMessage = {
-            id: `ai_${Date.now()}`,
-            senderName: 'Bạn (Gemini Tự động)',
-            content: reply,
-            timestamp: Date.now(),
-            isSelf: true,
-            conversationName: conv.name,
-          };
-          this.server?.emit('new_message', aiMessage);
           this.logger.log(`[AI Auto-Reply 100%] Đã tự động trả lời hội thoại "${conv.name}": "${reply}"`);
 
           // Chờ 2 giây trước khi sang hội thoại tiếp theo để tránh bị Zalo giới hạn
@@ -293,21 +274,7 @@ export class ChatGateway implements OnGatewayConnection, OnGatewayDisconnect {
     if (!payload.content) return { success: false, error: 'Tin nhắn trống' };
 
     this.logger.log(`Gửi tin thủ công từ Web UI: "${payload.content}"`);
-    const sent = await this.playwrightService.sendMessage(payload.content);
-
-    if (sent) {
-      const activeConv = this.playwrightService.getActiveConversationName();
-      const selfMsg: IncomingMessage = {
-        id: `manual_${Date.now()}`,
-        senderName: 'Tôi (Thủ công)',
-        content: payload.content,
-        timestamp: Date.now(),
-        isSelf: true,
-        conversationName: activeConv,
-      };
-      this.server.emit('new_message', selfMsg);
-    }
-
+    const sent = await this.playwrightService.sendMessage(payload.content, 'Tôi (Thủ công)');
     return { success: sent };
   }
 

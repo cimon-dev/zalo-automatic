@@ -139,36 +139,34 @@ export class ChatStoreService {
     }
   }
 
-  mergeMessages(conversationName: string, newMessages: IncomingMessage[]): IncomingMessage[] {
+  setMessages(conversationName: string, messages: IncomingMessage[]): IncomingMessage[] {
     if (!conversationName) return [];
     const key = this.normalizeKey(conversationName);
-    const existing = this.histories.get(key) || [];
 
-    const existingMap = new Map<string, IncomingMessage>();
-    existing.forEach((m) => {
-      existingMap.set(m.id || `${m.content}_${m.isSelf}`, m);
-    });
+    const validList: IncomingMessage[] = [];
+    const seen = new Set<string>();
 
-    for (const m of newMessages) {
+    for (const m of messages) {
       const cleanContent = sanitizeMessageContent(m.content);
       if (!cleanContent) continue;
-
-      const sanitizedMsg: IncomingMessage = {
-        ...m,
-        content: cleanContent,
-      };
-
-      const idKey = sanitizedMsg.id || `${sanitizedMsg.content}_${sanitizedMsg.isSelf}`;
-      if (!existingMap.has(idKey)) {
-        existingMap.set(idKey, sanitizedMsg);
-        existing.push(sanitizedMsg);
+      const idKey = m.id || `${cleanContent}_${m.isSelf}`;
+      if (!seen.has(idKey)) {
+        seen.add(idKey);
+        validList.push({
+          ...m,
+          content: cleanContent,
+          conversationName,
+        });
       }
     }
 
-    // Sắp xếp lại theo thời gian
-    existing.sort((a, b) => a.timestamp - b.timestamp);
-    this.histories.set(key, existing);
+    validList.sort((a, b) => a.timestamp - b.timestamp);
+    this.histories.set(key, validList);
     this.scheduleSave();
-    return existing;
+    return validList;
+  }
+
+  mergeMessages(conversationName: string, newMessages: IncomingMessage[]): IncomingMessage[] {
+    return this.setMessages(conversationName, newMessages);
   }
 }

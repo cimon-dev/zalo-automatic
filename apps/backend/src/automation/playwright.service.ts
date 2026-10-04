@@ -24,6 +24,7 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
   private cachedConversations: ConversationItem[] = [];
   private activeConversationName: string = '';
   private lastKnownSubtitles = new Map<string, string>();
+  private isSwitchingConversation = false;
 
   constructor(
     private readonly accountService: AccountService,
@@ -165,13 +166,14 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
       }
 
       // 2. Click tab "VỚI MÃ QR" nếu Zalo Web đang hiển thị tab Số điện thoại
-      const qrTab = await this.page.$(
-        '[data-translate-inner="STR_QR_CODE"], .tab-item:has-text("MÃ QR"), a:has-text("MÃ QR"), [class*="tab"]:has-text("QR"), a:has-text("QR")'
-      ).catch(() => null);
-      if (qrTab) {
-        await qrTab.click().catch(() => {});
-        await this.page.waitForTimeout(500);
-      }
+      await this.page.evaluate(() => {
+        const tabs = Array.from(document.querySelectorAll('a, div, span, li, [class*="tab"]'));
+        const qrTab = tabs.find((t) => t.textContent && (t.textContent.includes('MÃ QR') || t.textContent.includes('QR')));
+        if (qrTab && typeof (qrTab as HTMLElement).click === 'function') {
+          (qrTab as HTMLElement).click();
+        }
+      }).catch(() => {});
+      await this.page.waitForTimeout(600);
 
       this.logger.log('Đang tìm phần tử mã QR trên trang...');
       const qrElement = await this.page.waitForSelector(
@@ -235,6 +237,11 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
 
     try {
       await this.page.exposeFunction('__onZaloMessageReceived', (msg: IncomingMessage) => {
+        if (!msg || !msg.content || !msg.conversationName) return;
+
+        // Bỏ qua nếu đang trong quá trình chuyển đổi giữa các cuộc hội thoại
+        if (this.isSwitchingConversation) return;
+
         if (this.processedMessageIds.has(msg.id)) return;
         this.processedMessageIds.add(msg.id);
 
@@ -243,7 +250,7 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
           if (first) this.processedMessageIds.delete(first);
         }
 
-        const convName = msg.conversationName || this.activeConversationName || msg.senderName;
+        const convName = msg.conversationName;
         this.chatStoreService.addMessage(convName, msg);
 
         this.logger.log(`[Tin nhắn Zalo đến] [${convName}] ${msg.senderName}: "${msg.content}" (isSelf: ${msg.isSelf})`);
@@ -305,36 +312,50 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
         return { isSelf, senderName, content };
       };
 
-      const observer = new MutationObserver(() => {
-        const chatContainer = document.querySelector('#chatViewContainer, .chat-view-container, #message-view, [id^="chatView"]');
-        if (!chatContainer) return;
+      const observer = new MutationObserver((mutations) => {
+        if ((window as any).__isSwitchingConversation) return;
 
-        const headerTitleEl = document.querySelector('.header-title, .chat-info-name, .header-user-name, [class*="chat-title"]');
-        const activeChatTitle = headerTitleEl?.textContent?.trim() || '';
+        const headerEl = document.querySelector('header#header .main-title-container, header#header .header-title, .main-title-container, .header-title');
+        const activeChatTitle = (headerEl?.textContent || '').replace(/[\s\u00a0]+/g, ' ').trim();
+        if (!activeChatTitle) return;
 
-        const candidateRows = chatContainer.querySelectorAll('.chat-message, [id^="bb_msg_"]');
+        for (const mutation of mutations) {
+          if (!mutation.addedNodes || mutation.addedNodes.length === 0) continue;
 
-        candidateRows.forEach((row) => {
-          if (row.closest('#chat-list-container, .conv-list, .nav__tabs, #recent-search-list')) return;
+          for (const node of Array.from(mutation.addedNodes)) {
+            if (!(node instanceof HTMLElement)) continue;
 
-          const { isSelf, senderName, content } = extractMessageData(row, activeChatTitle);
-          if (!content || content.length === 0 || content === 'Đã gửi' || content === 'Đã nhận') return;
+            const rows = node.matches('.chat-message, [id^="bb_msg_"]')
+              ? [node]
+              : Array.from(node.querySelectorAll('.chat-message, [id^="bb_msg_"]'));
 
-          const id = row.getAttribute('id') || `${content.substring(0, 15)}_${row.getBoundingClientRect().top}`;
+            // Nếu nhiều hơn 2 tin nhắn được thêm cùng lúc, đây là việc nạp lịch sử chat, không phải tin nhắn mới đến trong thời gian thực
+            if (rows.length > 2) continue;
 
-          (window as any).__onZaloMessageReceived({
-            id,
-            senderName,
-            content,
-            timestamp: Date.now(),
-            isSelf,
-            conversationName: activeChatTitle,
-          });
-        });
+            for (const row of rows) {
+              if (row.closest('#chat-list-container, .conv-list, .nav__tabs, #recent-search-list')) continue;
+
+              const { isSelf, senderName, content } = extractMessageData(row, activeChatTitle);
+              if (!content || content.length === 0 || content === 'Đã gửi' || content === 'Đã nhận') continue;
+
+              const id = row.getAttribute('id') || `msg_${Date.now()}_${content.substring(0, 10)}`;
+
+              (window as any).__onZaloMessageReceived({
+                id,
+                senderName,
+                content,
+                timestamp: Date.now(),
+                isSelf,
+                conversationName: activeChatTitle,
+              });
+            }
+          }
+        }
       });
 
-      observer.observe(document.body, { childList: true, subtree: true });
-      console.log('✅ Global Zalo MutationObserver đã kích hoạt với cơ chế trích xuất chuẩn xác!');
+      const chatView = document.querySelector('#chatViewContainer, .chat-view-container, #message-view, [id^="chatView"]') || document.body;
+      observer.observe(chatView, { childList: true, subtree: true });
+      console.log('✅ Global Zalo MutationObserver đã kích hoạt với cơ chế trích xuất addedNodes chuẩn xác!');
     });
   }
 
@@ -364,7 +385,7 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
           );
           const isMuted = !!muteEl;
 
-          const name = titleEl?.textContent?.trim();
+          const name = titleEl?.textContent?.replace(/[\s\u00a0]+/g, ' ').trim();
           if (name) {
             const id = item.getAttribute('id') || item.getAttribute('data-id') || `conv_${index}_${name}`;
             const unreadText = badgeEl?.textContent?.trim() || '0';
@@ -387,33 +408,6 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
 
         return results;
       });
-
-      // Kiểm tra xem có tin nhắn mới nào xuất hiện ở subtitle danh sách hội thoại không
-      for (const conv of conversations) {
-        const prevSub = this.lastKnownSubtitles.get(conv.name);
-        if (prevSub !== undefined && conv.lastMessage && prevSub !== conv.lastMessage) {
-          const isFromSelf = conv.lastMessage.startsWith('Bạn: ') || conv.lastMessage.startsWith('Tôi: ');
-          const cleanText = conv.lastMessage.replace(/^(Bạn|Tôi):\s*/, '').trim();
-
-          const incoming: IncomingMessage = {
-            id: `sub_${Date.now()}_${cleanText.substring(0, 10)}`,
-            senderName: isFromSelf ? 'Tôi' : conv.name,
-            content: cleanText,
-            timestamp: Date.now(),
-            isSelf: isFromSelf,
-            conversationName: conv.name,
-          };
-
-          this.chatStoreService.addMessage(conv.name, incoming);
-          if (!isFromSelf) {
-            this.logger.log(`[Tin nhắn mới từ Hội Thoại] ${conv.name}: "${cleanText}" (isMuted: ${conv.isMuted})`);
-            this.emit('incoming_message', incoming);
-          }
-        }
-        if (conv.lastMessage) {
-          this.lastKnownSubtitles.set(conv.name, conv.lastMessage);
-        }
-      }
 
       this.cachedConversations = conversations;
       this.emit('conversations_updated', conversations);
@@ -455,6 +449,9 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
     const cachedHistory = this.chatStoreService.getMessages(cleanName);
     this.emit('chat_history', { conversationName: cleanName, messages: cachedHistory });
 
+    this.isSwitchingConversation = true;
+    await this.page.evaluate(() => { (window as any).__isSwitchingConversation = true; }).catch(() => {});
+
     try {
       // 2. Đóng thanh popup tìm kiếm triệt để
       await this.page.evaluate(() => {
@@ -463,22 +460,23 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
           searchInput.value = '';
           searchInput.blur();
         }
-      });
+      }).catch(() => {});
       await this.page.keyboard.press('Escape').catch(() => {});
       await this.page.keyboard.press('Escape').catch(() => {});
-      await this.page.waitForTimeout(150);
+      await this.page.waitForTimeout(100);
 
       // 3. Tìm và click trực tiếp bằng JavaScript trong DOM để chuẩn hóa khoảng trắng và non-breaking spaces
-      const clicked = await this.page.evaluate((targetNorm) => {
+      const clicked = await this.page.evaluate(({ cleanName, targetIndex }) => {
         const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
-        const needle = normalize(targetNorm);
+        const needle = normalize(cleanName);
 
         const items = Array.from(document.querySelectorAll(
           '.conv-item, .chat-item, [id^="conv-item-"], div[tabindex="0"].conv-item'
         ));
 
-        // Ưu tiên tìm khớp tên chính xác
         let targetEl: HTMLElement | null = null;
+
+        // Ưu tiên tìm khớp tên chính xác
         for (const item of items) {
           const title = item.querySelector('.conv-item-title, .truncate, .chat-item-title, .name');
           if (title && normalize(title.textContent || '') === needle) {
@@ -498,35 +496,55 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
           }
         }
 
+        // Fallback theo index nếu có
+        if (!targetEl && typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex < items.length) {
+          targetEl = items[targetIndex] as HTMLElement;
+        }
+
         if (targetEl) {
           targetEl.scrollIntoView({ block: 'center' });
           const clickChild = (targetEl.querySelector('.conv-item-title, .truncate, .chat-item-title, .name') || targetEl) as HTMLElement;
+          ['mousedown', 'mouseup', 'click'].forEach(evt => {
+            clickChild.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true }));
+            targetEl.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true }));
+          });
           clickChild.click();
+          targetEl.click();
           return true;
         }
 
         return false;
-      }, cleanName);
+      }, { cleanName, targetIndex });
 
       if (clicked) {
-        // Chờ chat-view cập nhật phần tử tin nhắn
-        await this.page.waitForSelector('#chatViewContainer .chat-message, [id^="bb_msg_"]', { timeout: 3500 }).catch(() => {});
-        await this.page.waitForTimeout(800);
-        await this.syncCurrentChatMessages(cleanName);
-        await this.syncConversations();
-        return true;
-      }
+        // Chờ header cập nhật sang cuộc hội thoại mong muốn (tối đa 2.5s)
+        await this.page.waitForFunction((expectedName) => {
+          const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
+          const needle = normalize(expectedName);
+          const headerEl = document.querySelector('header#header .main-title-container, header#header .header-title, .main-title-container, .header-title');
+          const title = normalize(headerEl?.textContent || '');
+          return title.length > 0 && (title.includes(needle) || needle.includes(title));
+        }, cleanName, { timeout: 2500 }).catch(() => {});
 
-      // 4. Fallback theo Index nếu tìm tên không ra
-      if (typeof targetIndex === 'number') {
-        const allItems = this.page.locator('.conv-item, .chat-item, [id^="conv-item-"], div[tabindex="0"].conv-item');
-        const count = await allItems.count();
-        if (targetIndex >= 0 && targetIndex < count) {
-          await allItems.nth(targetIndex).click({ timeout: 4000 });
-          await this.page.waitForSelector('#chatViewContainer .chat-message, [id^="bb_msg_"]', { timeout: 3500 }).catch(() => {});
-          await this.page.waitForTimeout(800);
-          await this.syncCurrentChatMessages(cleanName);
+        await this.page.waitForTimeout(300);
+
+        // Kiểm tra xem header thực tế trên Zalo Web đã chuyển sang hội thoại này chưa
+        const actualHeader = await this.page.evaluate(() => {
+          const headerEl = document.querySelector('header#header .main-title-container, header#header .header-title, .main-title-container, .header-title');
+          return (headerEl?.textContent || '').replace(/[\s\u00a0]+/g, ' ').trim();
+        });
+
+        const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
+        const normActual = normalize(actualHeader);
+        const normExpected = normalize(cleanName);
+
+        if (normActual && (normActual.includes(normExpected) || normExpected.includes(normActual))) {
+          this.activeConversationName = actualHeader;
+          await this.syncCurrentChatMessages(actualHeader);
           await this.syncConversations();
+          return true;
+        } else {
+          this.logger.warn(`Header Zalo hiện tại là "${actualHeader}", không khớp "${cleanName}". Bỏ qua nạp từ DOM để bảo vệ dữ liệu.`);
           return true;
         }
       }
@@ -535,6 +553,9 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
     } catch (error) {
       this.logger.error(`Lỗi mở cuộc trò chuyện: ${error.message}`);
       return false;
+    } finally {
+      this.isSwitchingConversation = false;
+      await this.page.evaluate(() => { (window as any).__isSwitchingConversation = false; }).catch(() => {});
     }
   }
 
@@ -543,9 +564,31 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
    */
   async syncCurrentChatMessages(convName?: string): Promise<IncomingMessage[]> {
     if (!this.page || this.status !== 'READY') return [];
-    const targetConv = convName || this.activeConversationName;
+    let targetConv = convName || this.activeConversationName;
 
     try {
+      const currentHeader = await this.page.evaluate(() => {
+        const headerEl = document.querySelector('header#header .main-title-container, header#header .header-title, .main-title-container, .header-title');
+        return (headerEl?.textContent || '').replace(/[\s\u00a0]+/g, ' ').trim();
+      });
+
+      targetConv = convName || currentHeader || this.activeConversationName;
+      if (!targetConv) return [];
+
+      const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
+      const normTarget = normalize(targetConv);
+      const normHeader = normalize(currentHeader);
+
+      // KIỂM TRA BẢO VỆ CHỐNG NHẢY TIN NHẮN: Nếu có tên chỉ định mà Header thực tế trên Zalo không khớp -> BỎ QUA NGAY!
+      if (convName && normHeader && normTarget && !normHeader.includes(normTarget) && !normTarget.includes(normHeader)) {
+        this.logger.warn(`[syncCurrentChatMessages] BẢO VỆ DỮ LIỆU: Header trên Zalo là "${currentHeader}", không khớp yêu cầu "${targetConv}". Bỏ qua nạp từ DOM.`);
+        const cached = this.chatStoreService.getMessages(targetConv);
+        this.emit('chat_history', { conversationName: targetConv, messages: cached });
+        return cached;
+      }
+
+      const actualConvToSave = currentHeader || targetConv;
+
       const messages: IncomingMessage[] = await this.page.evaluate((contactName) => {
         const results: IncomingMessage[] = [];
         const container = document.querySelector('#chatViewContainer, .chat-view-container, #message-view, [id^="chatView"]') || document.body;
@@ -617,19 +660,25 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
         });
 
         return results;
-      }, targetConv);
+      }, actualConvToSave);
 
-      if (messages.length > 0 && targetConv) {
-        const merged = this.chatStoreService.mergeMessages(targetConv, messages);
-        this.emit('chat_history', { conversationName: targetConv, messages: merged });
-        return merged;
+      // Đánh dấu tất cả ID tin nhắn này vào processedMessageIds để MutationObserver không emit lại
+      for (const m of messages) {
+        if (m.id) this.processedMessageIds.add(m.id);
       }
 
-      const existing = this.chatStoreService.getMessages(targetConv);
-      this.emit('chat_history', { conversationName: targetConv, messages: existing });
+      if (messages.length > 0 && actualConvToSave) {
+        const updated = this.chatStoreService.setMessages(actualConvToSave, messages);
+        this.emit('chat_history', { conversationName: actualConvToSave, messages: updated });
+        return updated;
+      }
+
+      const existing = this.chatStoreService.getMessages(actualConvToSave);
+      this.emit('chat_history', { conversationName: actualConvToSave, messages: existing });
       return existing;
     } catch (e) {
-      const fallback = this.chatStoreService.getMessages(targetConv);
+      this.logger.error(`Lỗi khi syncCurrentChatMessages: ${e.message}`);
+      const fallback = targetConv ? this.chatStoreService.getMessages(targetConv) : [];
       this.emit('chat_history', { conversationName: targetConv, messages: fallback });
       return fallback;
     }
@@ -813,8 +862,8 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
 
       // 5. Lấy tên cuộc trò chuyện vừa mở từ Header
       const newChatName = await this.page.evaluate(() => {
-        const headerEl = document.querySelector('.header-title, .chat-info-name, .header-user-name, [class*="chat-title"]');
-        return headerEl?.textContent?.trim() || '';
+        const headerEl = document.querySelector('header#header .main-title-container, header#header .header-title, .main-title-container, .header-title, .chat-info-name');
+        return (headerEl?.textContent || '').replace(/[\s\u00a0]+/g, ' ').trim();
       });
 
       const activeName = newChatName || target.name || phone;
@@ -833,7 +882,7 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
   /**
    * Gửi tin nhắn qua Zalo và tự động lưu vào Chat Store
    */
-  async sendMessage(text: string): Promise<boolean> {
+  async sendMessage(text: string, senderName = 'Tôi (Thủ công)'): Promise<boolean> {
     if (!this.page || this.status !== 'READY') {
       this.logger.warn('Không thể gửi tin: Playwright chưa sẵn sàng!');
       return false;
@@ -876,17 +925,18 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
 
       this.logger.log(`Đã gửi tin nhắn: "${text}"`);
 
-      // Lưu tin nhắn gửi đi vào database lịch sử chat
+      // Lưu tin nhắn gửi đi vào database lịch sử chat và phát broadcast
       const activeConv = this.activeConversationName || 'Cuộc trò chuyện';
       const sentMsg: IncomingMessage = {
-        id: `manual_${Date.now()}`,
-        senderName: 'Tôi (Thủ công)',
+        id: `msg_sent_${Date.now()}`,
+        senderName,
         content: text,
         timestamp: Date.now(),
         isSelf: true,
         conversationName: activeConv,
       };
       this.chatStoreService.addMessage(activeConv, sentMsg);
+      this.emit('incoming_message', sentMsg);
 
       await this.page.waitForTimeout(500);
       await this.syncCurrentChatMessages(activeConv);

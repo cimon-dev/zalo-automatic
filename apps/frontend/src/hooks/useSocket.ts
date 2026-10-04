@@ -190,12 +190,14 @@ export function useSocket() {
       }
 
       const currentActive = activeConversationRef.current;
-      if (convName && currentActive?.name) {
-        const normEvent = convName.replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
-        const normActive = currentActive.name.replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
-        if (normEvent !== normActive) {
-          return; // Bỏ qua nếu dữ liệu thuộc cuộc hội thoại khác
-        }
+      if (!currentActive?.name || !convName) return; // Không có hội thoại đang mở hoặc không có convName -> Bỏ qua
+
+      const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
+      const normEvent = normalize(convName);
+      const normActive = normalize(currentActive.name);
+
+      if (normEvent !== normActive && !normEvent.includes(normActive) && !normActive.includes(normEvent)) {
+        return; // Bỏ qua nếu dữ liệu thuộc cuộc hội thoại khác
       }
       setMessages(list);
     });
@@ -207,37 +209,57 @@ export function useSocket() {
       const msgConv = normalize(msg.conversationName || '');
       const msgSender = normalize(msg.senderName || '');
 
+      // Tin nhắn này chỉ thuộc hội thoại hiện tại NẾU có hội thoại đang mở VÀ tên khớp!
       const isCurrentConv =
-        !currentActive ||
-        msg.isSelf ||
-        msgConv === activeName ||
-        msgSender === activeName;
+        activeName.length > 0 &&
+        (msgConv === activeName ||
+         (msgConv.length > 0 && (msgConv.includes(activeName) || activeName.includes(msgConv))) ||
+         (!msg.isSelf && (msgSender === activeName || (msgSender.length > 0 && (msgSender.includes(activeName) || activeName.includes(msgSender))))));
 
       if (isCurrentConv) {
         setMessages((prev) => {
           if (prev.some((m) => m.id === msg.id)) return prev;
+          const isDup = prev.some(
+            (m) =>
+              m.isSelf === msg.isSelf &&
+              m.content.trim() === msg.content.trim() &&
+              Math.abs(m.timestamp - msg.timestamp) < 3000
+          );
+          if (isDup) return prev;
           return [...prev, msg];
         });
       }
 
       // Cập nhật lại danh sách hội thoại và đưa hội thoại có tin nhắn mới lên đầu
       setConversations((prev) => {
-        const targetConvName = msg.conversationName || msg.senderName;
-        const exists = prev.find((c) => normalize(c.name) === normalize(targetConvName));
+        const targetConvName = msg.conversationName || (!msg.isSelf ? msg.senderName : '');
+        if (!targetConvName) return prev;
+        const normTarget = normalize(targetConvName);
+
+        const exists = prev.find((c) => {
+          const cNorm = normalize(c.name);
+          return cNorm === normTarget || cNorm.includes(normTarget) || normTarget.includes(cNorm);
+        });
+
         if (exists) {
           const updated = prev.map((c) => {
-            if (normalize(c.name) === normalize(targetConvName)) {
+            const cNorm = normalize(c.name);
+            const matches = cNorm === normTarget || cNorm.includes(normTarget) || normTarget.includes(cNorm);
+            if (matches) {
               return {
                 ...c,
                 lastMessage: msg.content,
                 time: 'Vừa xong',
-                unreadCount: isCurrentConv ? 0 : (c.unreadCount || 0) + 1,
+                unreadCount: isCurrentConv || msg.isSelf ? 0 : (c.unreadCount || 0) + 1,
               };
             }
             return c;
           });
-          const target = updated.find((c) => normalize(c.name) === normalize(targetConvName))!;
-          return [target, ...updated.filter((c) => normalize(c.name) !== normalize(targetConvName))];
+          const target = updated.find((c) => {
+            const cNorm = normalize(c.name);
+            return cNorm === normTarget || cNorm.includes(normTarget) || normTarget.includes(cNorm);
+          })!;
+          return [target, ...updated.filter((c) => c !== target)];
         }
         return prev;
       });
@@ -296,6 +318,12 @@ export function useSocket() {
 
     // Lấy ngay lịch sử chat đã lưu trong backend (đồng thời làm mới màn hình, tránh giữ tin nhắn của hội thoại cũ)
     socketRef.current?.emit('get_chat_history', { conversationName: conv.name }, (res: any) => {
+      const currentActiveNow = activeConversationRef.current;
+      const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
+      if (!currentActiveNow || normalize(currentActiveNow.name) !== normalize(conv.name)) {
+        return; // Người dùng đã chuyển sang hội thoại khác
+      }
+
       let msgs: MessageItem[] = [];
       if (Array.isArray(res)) {
         msgs = res;
@@ -318,6 +346,11 @@ export function useSocket() {
         index: typeof index === 'number' ? index : conv.index,
       },
       (res: any) => {
+        const currentActiveNow = activeConversationRef.current;
+        const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
+        if (!currentActiveNow || normalize(currentActiveNow.name) !== normalize(conv.name)) {
+          return; // Người dùng đã chuyển sang hội thoại khác
+        }
         if (res?.messages && Array.isArray(res.messages) && res.messages.length > 0) {
           setMessages(res.messages);
         }
