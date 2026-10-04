@@ -464,8 +464,7 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
     }
 
     const cleanName = targetName.replace(/^conv_\d+_/, '').trim();
-    this.activeConversationName = cleanName;
-    this.logger.log(`Đang mở cuộc trò chuyện: "${cleanName}" (Index: ${targetIndex})`);
+    this.logger.log(`Đang mở cuộc trò chuyện: "${cleanName}"`);
 
     // 1. Gửi NGAY LẬP TỨC lịch sử tin nhắn đã lưu trong database sang UI
     const cachedHistory = this.chatStoreService.getMessages(cleanName);
@@ -475,7 +474,7 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
     await this.page.evaluate(() => { (window as any).__isSwitchingConversation = true; }).catch(() => {});
 
     try {
-      // 2. Đóng thanh popup tìm kiếm triệt để
+      // 2. Đóng thanh popup tìm kiếm trước khi chọn
       await this.page.evaluate(() => {
         const searchInput = document.querySelector('#contact-search-input') as HTMLInputElement;
         if (searchInput) {
@@ -487,8 +486,8 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
       await this.page.keyboard.press('Escape').catch(() => {});
       await this.page.waitForTimeout(100);
 
-      // 3. Tìm và click trực tiếp bằng JavaScript trong DOM để chuẩn hóa khoảng trắng và non-breaking spaces
-      const clicked = await this.page.evaluate(({ cleanName, targetIndex }) => {
+      // 3. Tìm và click trực tiếp bằng JavaScript trong DOM để chuẩn hóa khoảng trắng
+      let clicked = await this.page.evaluate(({ cleanName }) => {
         const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
         const needle = normalize(cleanName);
 
@@ -507,20 +506,16 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
           }
         }
 
-        // Nếu không khớp tuyệt đối, tìm khớp một phần
-        if (!targetEl) {
+        // Nếu không khớp tuyệt đối, tìm khớp một phần (chỉ khi tên tìm kiếm đủ dài >= 3 ký tự)
+        if (!targetEl && needle.length >= 3) {
           for (const item of items) {
             const title = item.querySelector('.conv-item-title, .truncate, .chat-item-title, .name');
-            if (title && normalize(title.textContent || '').includes(needle)) {
+            const tText = normalize(title?.textContent || '');
+            if (tText && (tText === needle || tText.includes(needle) || needle.includes(tText))) {
               targetEl = item as HTMLElement;
               break;
             }
           }
-        }
-
-        // Fallback theo index nếu có
-        if (!targetEl && typeof targetIndex === 'number' && targetIndex >= 0 && targetIndex < items.length) {
-          targetEl = items[targetIndex] as HTMLElement;
         }
 
         if (targetEl) {
@@ -536,7 +531,45 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
         }
 
         return false;
-      }, { cleanName, targetIndex });
+      }, { cleanName });
+
+      // Nếu không tìm thấy trong danh sách hiển thị, tìm kiếm qua Search bar của Zalo
+      if (!clicked) {
+        this.logger.log(`Không thấy "${cleanName}" trong danh sách hiển thị, tìm kiếm qua Search bar...`);
+        const searchInput = await this.page.$(ZaloSelectors.SEARCH_INPUT);
+        if (searchInput) {
+          await searchInput.click();
+          await searchInput.fill('');
+          await searchInput.type(cleanName, { delay: 35 });
+          await this.page.waitForTimeout(600);
+
+          clicked = await this.page.evaluate(({ cleanName }) => {
+            const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
+            const needle = normalize(cleanName);
+            const popupItems = Array.from(document.querySelectorAll(
+              '#recent-search-list .search-item, #recent-search-list .contact-item, #recent-search-list div[tabindex], .search-results .search-item'
+            ));
+            for (const el of popupItems) {
+              const text = normalize(el.textContent || '');
+              if (text && (text === needle || text.includes(needle) || needle.includes(text))) {
+                const target = el as HTMLElement;
+                ['mousedown', 'mouseup', 'click'].forEach(evt => {
+                  target.dispatchEvent(new MouseEvent(evt, { bubbles: true, cancelable: true }));
+                });
+                target.click();
+                return true;
+              }
+            }
+            if (popupItems.length > 0) {
+              (popupItems[0] as HTMLElement).click();
+              return true;
+            }
+            return false;
+          }, { cleanName });
+
+          await this.page.keyboard.press('Escape').catch(() => {});
+        }
+      }
 
       if (clicked) {
         // Chờ header cập nhật sang cuộc hội thoại mong muốn (tối đa 2.5s)
@@ -545,10 +578,10 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
           const needle = normalize(expectedName);
           const headerEl = document.querySelector('header#header .main-title-container, header#header .header-title, .main-title-container, .header-title');
           const title = normalize(headerEl?.textContent || '');
-          return title.length > 0 && (title.includes(needle) || needle.includes(title));
+          return title.length > 0 && (title === needle || title.includes(needle) || needle.includes(title));
         }, cleanName, { timeout: 2500 }).catch(() => {});
 
-        await this.page.waitForTimeout(300);
+        await this.page.waitForTimeout(200);
 
         // Kiểm tra xem header thực tế trên Zalo Web đã chuyển sang hội thoại này chưa
         const actualHeader = await this.page.evaluate(() => {
@@ -560,14 +593,17 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
         const normActual = normalize(actualHeader);
         const normExpected = normalize(cleanName);
 
-        if (normActual && (normActual.includes(normExpected) || normExpected.includes(normActual))) {
+        if (normActual && (normActual === normExpected || normActual.includes(normExpected) || normExpected.includes(normActual))) {
           this.activeConversationName = actualHeader;
           await this.syncCurrentChatMessages(actualHeader);
           await this.syncConversations();
           return true;
         } else {
           this.logger.warn(`Header Zalo hiện tại là "${actualHeader}", không khớp "${cleanName}". Bỏ qua nạp từ DOM để bảo vệ dữ liệu.`);
-          return true;
+          if (actualHeader) {
+            this.activeConversationName = actualHeader;
+          }
+          return false;
         }
       }
 
@@ -594,6 +630,12 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
         return (headerEl?.textContent || '').replace(/[\s\u00a0]+/g, ' ').trim();
       });
 
+      if (!currentHeader) {
+        // Không có header hợp lệ trên Zalo Web -> Bỏ qua nạp DOM
+        const cached = targetConv ? this.chatStoreService.getMessages(targetConv) : [];
+        return cached;
+      }
+
       targetConv = convName || currentHeader || this.activeConversationName;
       if (!targetConv) return [];
 
@@ -602,10 +644,9 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
       const normHeader = normalize(currentHeader);
 
       // KIỂM TRA BẢO VỆ CHỐNG NHẢY TIN NHẮN: Nếu có tên chỉ định mà Header thực tế trên Zalo không khớp -> BỎ QUA NGAY!
-      if (convName && normHeader && normTarget && !normHeader.includes(normTarget) && !normTarget.includes(normHeader)) {
+      if (convName && normHeader && normTarget && normHeader !== normTarget && !normHeader.includes(normTarget) && !normTarget.includes(normHeader)) {
         this.logger.warn(`[syncCurrentChatMessages] BẢO VỆ DỮ LIỆU: Header trên Zalo là "${currentHeader}", không khớp yêu cầu "${targetConv}". Bỏ qua nạp từ DOM.`);
         const cached = this.chatStoreService.getMessages(targetConv);
-        this.emit('chat_history', { conversationName: targetConv, messages: cached });
         return cached;
       }
 
@@ -980,7 +1021,6 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
     this.syncInterval = setInterval(async () => {
       if (this.status === 'READY' && !this.isSwitchingConversation) {
         await this.syncConversations();
-        await this.syncCurrentChatMessages();
       }
     }, 2000);
   }

@@ -28,7 +28,15 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   const [inputText, setInputText] = useState('');
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
-  const safeMessages = Array.isArray(messages) ? messages : [];
+  const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
+  const currentConvName = normalize(activeConversation?.name || '');
+
+  const safeMessages = (Array.isArray(messages) ? messages : []).filter((msg) => {
+    if (!currentConvName) return true;
+    if (!msg.conversationName) return true;
+    const msgConv = normalize(msg.conversationName);
+    return msgConv === currentConvName;
+  });
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });

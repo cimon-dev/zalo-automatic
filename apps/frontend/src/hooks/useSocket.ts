@@ -9,6 +9,7 @@ export interface MessageItem {
   content: string;
   timestamp: number;
   isSelf: boolean;
+  conversationName?: string;
 }
 
 export type PlaywrightStatus = 'DISCONNECTED' | 'INITIALIZING' | 'WAITING_QR' | 'READY' | 'ERROR';
@@ -168,10 +169,16 @@ export function useSocket() {
     socket.on('conversations_updated', (data: { conversations: ConversationItem[] }) => {
       setConversations(data.conversations || []);
       if (data.conversations?.length > 0) {
-        const active = data.conversations.find((c) => c.isActive);
-        if (active) {
-          setActiveConversation((prev) => prev ? { ...prev, ...active } : active);
-        }
+        setActiveConversation((prev) => {
+          if (!prev) {
+            const active = data.conversations.find((c) => c.isActive);
+            return active || null;
+          }
+          const normalize = (s: string) => (s || '').replace(/[\s\u00a0]+/g, ' ').trim().toLowerCase();
+          const pName = normalize(prev.name);
+          const matching = data.conversations.find((c) => normalize(c.name) === pName || c.id === prev.id);
+          return matching ? { ...prev, ...matching } : prev;
+        });
       }
     });
 
@@ -196,8 +203,8 @@ export function useSocket() {
       const normEvent = normalize(convName);
       const normActive = normalize(currentActive.name);
 
-      if (normEvent !== normActive && !normEvent.includes(normActive) && !normActive.includes(normEvent)) {
-        return; // Bỏ qua nếu dữ liệu thuộc cuộc hội thoại khác
+      if (normEvent !== normActive) {
+        return; // Bỏ qua nếu dữ liệu không phải của cuộc hội thoại đang mở
       }
       setMessages(list);
     });
@@ -209,12 +216,10 @@ export function useSocket() {
       const msgConv = normalize(msg.conversationName || '');
       const msgSender = normalize(msg.senderName || '');
 
-      // Tin nhắn này chỉ thuộc hội thoại hiện tại NẾU có hội thoại đang mở VÀ tên khớp!
+      // Tin nhắn này chỉ thuộc hội thoại hiện tại NẾU có hội thoại đang mở VÀ tên khớp chính xác!
       const isCurrentConv =
         activeName.length > 0 &&
-        (msgConv === activeName ||
-         (msgConv.length > 0 && (msgConv.includes(activeName) || activeName.includes(msgConv))) ||
-         (!msg.isSelf && (msgSender === activeName || (msgSender.length > 0 && (msgSender.includes(activeName) || activeName.includes(msgSender))))));
+        (msgConv ? msgConv === activeName : (!msg.isSelf && msgSender === activeName));
 
       if (isCurrentConv) {
         setMessages((prev) => {
@@ -310,6 +315,7 @@ export function useSocket() {
   const selectConversation = useCallback((conv: ConversationItem, index?: number) => {
     setActiveConversation(conv);
     activeConversationRef.current = conv;
+    setMessages([]); // Xóa sạch tin nhắn hiển thị ngay lập tức để không bị lưu lại tin nhắn của cuộc hội thoại cũ
 
     // Xóa ngay badge unread trên UI
     setConversations((prev) =>
