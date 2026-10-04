@@ -588,6 +588,9 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
       }
 
       const actualConvToSave = currentHeader || targetConv;
+      if (!convName && currentHeader) {
+        this.activeConversationName = currentHeader;
+      }
 
       const messages: IncomingMessage[] = await this.page.evaluate((contactName) => {
         const results: IncomingMessage[] = [];
@@ -953,11 +956,9 @@ export class PlaywrightService extends EventEmitter implements OnModuleInit, OnM
   private startPeriodicSync() {
     if (this.syncInterval) clearInterval(this.syncInterval);
     this.syncInterval = setInterval(async () => {
-      if (this.status === 'READY') {
+      if (this.status === 'READY' && !this.isSwitchingConversation) {
         await this.syncConversations();
-        if (this.activeConversationName) {
-          await this.syncCurrentChatMessages(this.activeConversationName);
-        }
+        await this.syncCurrentChatMessages();
       }
     }, 2000);
   }
